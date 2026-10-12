@@ -94,6 +94,11 @@ securekeys injecttest :: verify the SendInput Unicode autofill path; exit 0 = pa
 securekeys passkey    :: report Windows WebAuthn API version + platform-authenticator (Hello) availability
 securekeys passkey-demo :: full passkey flow — MakeCredential + GetAssertion via Windows Hello (2 prompts)
 securekeys verifysig <path> :: Authenticode-verify a file (the safe-update gate); exit 0 = signed & trusted
+securekeys store <name> :: enter a secret in the secure window -> Windows Credential Manager (DPAPI-protected)
+securekeys get <name>   :: vault -> clipboard
+securekeys list         :: list stored SecureKeys secrets
+securekeys forget <name> :: delete a stored secret
+securekeys credtest     :: automated vault write/read/delete round-trip; exit 0 = pass
 securekeys smoke      :: init window + tray + hotkey, then exit (crash-free check)
 ```
 
@@ -109,10 +114,11 @@ securekeys smoke      :: init window + tray + hotkey, then exit (crash-free chec
   server you host and a signing cert. The design is: fetch a signed version
   manifest over HTTPS → download → `verifysig` → run. Only the verify step is
   implemented so far.
-- **Password-manager integration** is a design direction, not code: there is no
-  universal API, so it means targeting a specific manager (e.g. a native
-  messaging host or credential-provider integration). Prefer passkeys where the
-  site supports them — then there is no secret for a manager to hold at all.
+- **Password-manager integration** is implemented against Windows' own built-in
+  vault — the **Credential Manager** (`store` / `get` / `list` / `forget`).
+  Secrets are DPAPI-protected by Windows under `SecureKeys/<name>`; no third-party
+  manager required. Verified by `credtest`. Prefer passkeys where the site
+  supports them — then there is no secret for a manager to hold at all.
 
 ## Status / roadmap
 
@@ -121,9 +127,11 @@ Working: capture-excluded hardened secure window; masked in-process input;
 window via `SendInput`** (verified by `injecttest`); global hotkey; tray icon;
 **full passkey flow** — `WebAuthNAuthenticatorMakeCredential` + `GetAssertion`
 via Windows Hello (`passkey` / `passkey-demo`); **Authenticode verification**
-(`verifysig`); built-in `selftest`; and the WGC verification harness.
+(`verifysig`); **secret storage in the Windows Credential Manager** (`store` /
+`get` / `list` / `forget`, verified by `credtest`); built-in `selftest`; and the
+WGC verification harness.
 
 Not built yet: HTTPS update download + an update server; a real code-signing
-cert; password-manager integration (see above).
+cert (both need infrastructure/a cert you own).
 
 See [THREAT_MODEL.md](THREAT_MODEL.md).

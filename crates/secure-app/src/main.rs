@@ -13,11 +13,15 @@
 // Built with CFG + CET + ASLR hardening (see ..\..\build.cmd). Zero external deps.
 //
 // Subcommands:
-//   securekeys            Run in the tray; Ctrl+Alt+S opens the secure window.
-//   securekeys selftest   Prove capture-exclusion (PrintWindow + GDI BitBlt). Exit 0=pass.
-//   securekeys demo <dir> Masking demo: render a typed secret as dots, capture it
-//                         with exclusion off (dots only, never plaintext) then on (blank).
-//   securekeys smoke      Init window+hotkey+tray, then exit (crash-free check).
+//   securekeys              Run in the tray; Ctrl+Alt+S opens the secure window.
+//   securekeys selftest     Prove capture-exclusion (PrintWindow + GDI BitBlt). Exit 0=pass.
+//   securekeys demo <dir>   Masking demo: dots-only vs blank captures.
+//   securekeys injecttest   Verify the SendInput Unicode autofill path.
+//   securekeys passkey[-demo]  WebAuthn/Windows Hello availability / full credential flow.
+//   securekeys verifysig <p>   Authenticode-verify a file (the safe-update gate).
+//   securekeys store/get/list/forget <name>   Windows Credential Manager vault.
+//   securekeys credtest     Automated vault round-trip. Exit 0=pass.
+//   securekeys smoke        Init window+hotkey+tray, then exit (crash-free check).
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -27,6 +31,7 @@ use std::sync::Mutex;
 
 mod passkey;
 mod verify;
+mod store;
 
 // ---------------- types ----------------
 type HWND = isize;
@@ -206,6 +211,9 @@ extern "system" {
 // ---------------- shared state ----------------
 struct State { secret: Vec<u16>, status: String, prior: HWND }
 static STATE: Mutex<State> = Mutex::new(State { secret: Vec::new(), status: String::new(), prior: 0 });
+// When set, Enter stores the secret into the Windows Credential Manager under
+// this name instead of copying to the clipboard (the `store <name>` command).
+static STORE_TARGET: Mutex<Option<String>> = Mutex::new(None);
 
 fn key_unicode(scan: u16, up: bool) -> INPUT {
     INPUT {
@@ -246,7 +254,7 @@ unsafe extern "system" fn secure_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
                 }
                 VK_ESCAPE => {
                     { let mut st = STATE.lock().unwrap(); zeroize(&mut st.secret); st.status = "Cleared.".into(); }
-                    ShowWindow(h, SW_HIDE);
+                    if STORE_TARGET.lock().unwrap().is_some() { DestroyWindow(h); } else { ShowWindow(h, SW_HIDE); }
                 }
                 VK_BACK => {
                     let mut st = STATE.lock().unwrap();
@@ -296,9 +304,9 @@ unsafe extern "system" fn secure_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_PAINT => { paint_secure(h); 0 }
-        WM_CLOSE => { // hide to tray instead of exiting
+        WM_CLOSE => { // hide to tray instead of exiting (store mode exits)
             { let mut st = STATE.lock().unwrap(); zeroize(&mut st.secret); }
-            ShowWindow(h, SW_HIDE);
+            if STORE_TARGET.lock().unwrap().is_some() { DestroyWindow(h); } else { ShowWindow(h, SW_HIDE); }
             0
         }
         WM_DESTROY => { PostQuitMessage(0); 0 }
@@ -393,6 +401,24 @@ unsafe fn paint_secure(h: HWND) {
 }
 
 unsafe fn confirm(h: HWND) {
+    // store mode: write to the Windows Credential Manager instead of the clipboard
+    let store_target = { STORE_TARGET.lock().unwrap().clone() };
+    if let Some(name) = store_target {
+        let secret_u16 = { STATE.lock().unwrap().secret.clone() };
+        if secret_u16.is_empty() { return; }
+        let mut bytes = String::from_utf16_lossy(&secret_u16).into_bytes();
+        let ok = store::write(&name, &bytes);
+        for b in bytes.iter_mut() { *b = 0; }
+        {
+            let mut st = STATE.lock().unwrap();
+            zeroize(&mut st.secret);
+            st.status = if ok { format!("Stored '{name}' in Windows Credential Manager.") } else { "Store FAILED.".into() };
+        }
+        InvalidateRect(h, null_mut(), 1);
+        Sleep(1100);
+        DestroyWindow(h);
+        return;
+    }
     let data: Vec<u16> = {
         let st = STATE.lock().unwrap();
         if st.secret.is_empty() { return; }
@@ -524,6 +550,26 @@ fn run_app() {
         }
         UnregisterHotKey(h, HOTKEY_ID);
         del_tray(h);
+        let mut st = STATE.lock().unwrap();
+        zeroize(&mut st.secret);
+    }
+}
+
+// `store <name>`: open the secure window; Enter writes the secret to the
+// Windows Credential Manager under SecureKeys/<name> (see confirm()).
+fn run_store(name: &str) {
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_PER_MONITOR_AWARE_V2);
+        { *STORE_TARGET.lock().unwrap() = Some(name.to_string()); }
+        let inst = GetModuleHandleW(null_mut());
+        let h = create_secure_window(inst, true);
+        show_secure(h);
+        println!("Enter the secret for '{name}' in the secure window (Enter = store, Esc = cancel).");
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
         let mut st = STATE.lock().unwrap();
         zeroize(&mut st.secret);
     }
@@ -802,9 +848,26 @@ fn main() {
             if p.is_empty() { eprintln!("usage: securekeys verifysig <path>"); std::process::exit(2); }
             std::process::exit(verify::run_verify(&p));
         }
+        "store" => {
+            let name = std::env::args().nth(2).unwrap_or_default();
+            if name.is_empty() { eprintln!("usage: securekeys store <name>"); std::process::exit(2); }
+            run_store(&name);
+        }
+        "get" => {
+            let name = std::env::args().nth(2).unwrap_or_default();
+            if name.is_empty() { eprintln!("usage: securekeys get <name>"); std::process::exit(2); }
+            std::process::exit(store::run_get(&name));
+        }
+        "forget" => {
+            let name = std::env::args().nth(2).unwrap_or_default();
+            if name.is_empty() { eprintln!("usage: securekeys forget <name>"); std::process::exit(2); }
+            std::process::exit(store::run_forget(&name));
+        }
+        "list" => std::process::exit(store::run_list()),
+        "credtest" => std::process::exit(store::run_credtest()),
         "" => run_app(),
         other => {
-            eprintln!("unknown subcommand: {other}\nusage: securekeys [selftest|demo <dir>|smoke|passkey|passkey-demo|injecttest|verifysig <path>]");
+            eprintln!("unknown subcommand: {other}\nusage: securekeys [selftest|demo <dir>|smoke|passkey|passkey-demo|injecttest|verifysig <path>|store <name>|get <name>|list|forget <name>|credtest]");
             std::process::exit(2);
         }
     }

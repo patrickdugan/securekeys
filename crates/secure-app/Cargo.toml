@@ -1,0 +1,9 @@
+[package]
+name = "secure-app"
+version = "0.1.0"
+edition = "2021"
+description = "SecureKeys: a capture-excluded, hardened secure-input window for Windows 11 (zero external dependencies)"
+
+[[bin]]
+name = "securekeys"
+path = "src/main.rs"

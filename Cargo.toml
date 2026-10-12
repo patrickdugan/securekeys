@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/secure-app", "crates/wgc-capture"]
+resolver = "2"
+
+[profile.release]
+opt-level = 2
